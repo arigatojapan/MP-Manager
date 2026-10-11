@@ -32,6 +32,9 @@ jobs:
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
+      - name: Fix android-37 SDK naming (runner installs as android-37.0)
+        run: ln -sf $ANDROID_SDK_ROOT/platforms/android-37.0 $ANDROID_SDK_ROOT/platforms/android-37 || true
+
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace
