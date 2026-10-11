@@ -2,7 +2,7 @@ package io.github.abdurazaaqmohammed.adapters.main;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import androidx.preference.PreferenceManager;
+import android.preference.PreferenceManager;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -36,7 +36,6 @@ public final class FileMenuOrder {
     public static final String CMP_TEXT = "cmp_text";
     public static final String CMP_HASH = "cmp_hash";
     public static final String CMP_APK = "cmp_apk";
-    public static final String CMP_DEX = "cmp_dex";
     public static final String BATCH_CROP = "batch_crop";
     public static final String BATCH_EXIF = "batch_exif";
     public static final String BATCH_STRIP_META = "batch_strip_meta";
@@ -44,7 +43,7 @@ public final class FileMenuOrder {
     public static final String[] DEFAULT_ORDER = {
             COPY, MOVE, RENAME, DELETE, COMPRESS, PROPERTIES, SHARE, OPEN_WITH,
             BOOKMARK, CMD, CHECK, EXTRACT, BATCH_SIGN, BATCH_OPT, BATCH_INSTALL,
-            CMP_ZIP, CMP_ARSC, CMP_TEXT, CMP_HASH, CMP_APK, CMP_DEX,
+            CMP_ZIP, CMP_ARSC, CMP_TEXT, CMP_HASH, CMP_APK,
             BATCH_CROP, BATCH_EXIF, BATCH_STRIP_META
     };
 
@@ -83,15 +82,15 @@ public final class FileMenuOrder {
         for (String id : DEFAULT_ORDER) {
             if (!order.contains(id)) order.add(id);
         }
-        // Third-party actions join the order list so they show up in the
-        // "File menu order" organizer and keep user arrangement across loads.
+        // Aksi plugin ikut masuk daftar urutan menu,
+        // supaya posisi yang diatur pengguna tetap tersimpan.
         try {
             for (String id : ExtensionRegistry.fileMenuIds()) {
                 if (id != null && !order.contains(id)) order.add(id);
             }
         } catch (Exception ignored) {
         }
-        // External (out-of-process) actions likewise persist and organize.
+        // Aksi plugin eksternal juga mengikuti urutan ini.
         try {
             for (String id : ExternalActions.fileMenuIds(context)) {
                 if (id != null && !order.contains(id)) order.add(id);
@@ -149,7 +148,6 @@ public final class FileMenuOrder {
             case CMP_TEXT -> context.getString(R.string.compare_text);
             case CMP_HASH -> context.getString(R.string.compare_hashes);
             case CMP_APK -> context.getString(R.string.compare_apks);
-            case CMP_DEX -> context.getString(R.string.compare_dex);
             case BATCH_CROP -> context.getString(R.string.crop_images);
             case BATCH_EXIF -> context.getString(R.string.set_exif_tags);
             case BATCH_STRIP_META -> context.getString(R.string.remove_metadata);
@@ -187,7 +185,7 @@ public final class FileMenuOrder {
             case BATCH_SIGN, BATCH_OPT, BATCH_INSTALL -> R.drawable.apk_document_24px;
             case EXTRACT -> R.drawable.baseline_compress_24;
             case CMP_ZIP, CMP_ARSC -> R.drawable.baseline_swap_horiz_24;
-            case CMP_TEXT, CMP_HASH, CMP_APK, CMP_DEX -> R.drawable.baseline_swap_horiz_24;
+            case CMP_TEXT, CMP_HASH, CMP_APK -> R.drawable.baseline_swap_horiz_24;
             case BATCH_CROP -> R.drawable.edit_24px;
             case BATCH_EXIF -> R.drawable.baseline_text_snippet_24;
             case BATCH_STRIP_META -> R.drawable.baseline_delete_24;
@@ -195,7 +193,7 @@ public final class FileMenuOrder {
                 try {
                     int icon = ExtensionIcons.resId(context,
                             ExtensionRegistry.fileMenuIconName(id), 0);
-                    // External plugins cannot ship icons; mark with the tools glyph.
+                    // Pakai ikon tools untuk plugin eksternal.
                     if (icon == 0 && id != null && id.startsWith("ext:")) {
                         icon = R.drawable.tools_24px;
                     }

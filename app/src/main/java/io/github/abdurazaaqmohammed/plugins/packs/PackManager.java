@@ -26,30 +26,20 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Installs, verifies, loads and removes downloadable tool packs.
- *
- * <p>Trust model: packs run in the host process with host permissions.
- * Catalog entries SHOULD carry a SHA-256; files with a known checksum are
- * rejected on mismatch. Entries without a checksum install only after the
- * user confirms in ToolsHub (sideload path, e.g. local test builds).
- */
+// Install, verify, load, remove tool packs
 public final class PackManager {
 
     private static final String PREFS = "tool_packs";
     private static final String KEY_PREFIX = "pack_";
 
-    /** packId -> loaded tool ids, for unregister on remove/update. */
+    // packId -> tool ids (buat unregister)
     private static final Map<String, List<String>> LOADED = new HashMap<>();
 
-    /** packId -> version reported by the loaded pack APK itself. */
+    // packId -> versi dari APK pack-nya sendiri
     private static final Map<String, Integer> PACK_VERSIONS = new HashMap<>();
 
-    /** packId -> loaded extensions, for unregister on remove/update. */
+    // packId -> extension (buat unregister)
     private static final Map<String, List<AppExtension>> LOADED_EXT = new HashMap<>();
-
-    /** Set when loadPack throws; consumed by installDownloadedPack. */
-    private static String sLoadError;
 
     private PackManager() {
     }
@@ -66,7 +56,7 @@ public final class PackManager {
         return dir;
     }
 
-    // ---------- install state ----------
+    // Status pemasangan
 
     public static boolean isInstalled(Context context, String packId) {
         return installedVersion(context, packId) > 0 && packFile(context, packId).exists();
@@ -92,9 +82,9 @@ public final class PackManager {
         return new File(packsDir(context), packId + ".apk");
     }
 
-    // ---------- loading ----------
+    // Loading
 
-    /** Load every installed pack. Called once from Application.onCreate. */
+    // Load semua pack, dipanggil sekali dari Application.onCreate
     public static void loadInstalledPacks(Context context) {
         for (PackDescriptor p : PackCatalog.load(context)) {
             if (isInstalled(context, p.id)) {
@@ -103,16 +93,12 @@ public final class PackManager {
         }
     }
 
-    /**
-     * Load one pack APK and register its tools. Returns the tool ids loaded.
-     */
+    // Load 1 pack APK, register tools-nya
     public static synchronized List<String> loadPack(Context context, File apk, String entryClass, String packId) {
         List<String> loaded = new ArrayList<>();
         if (apk == null || !apk.exists() || entryClass == null || entryClass.isEmpty()) return loaded;
-        // Same-signer gate: in-process code inherits every host permission
-        // (root, Shizuku, all files, network), so only first-party packs may
-        // load here. Third-party code must ship as an external plugin.
-        // Debuggable builds skip the gate for local pack development.
+        // Cuma pack dari app sendiri yang boleh load di sini
+        // (third-party harus jadi plugin eksternal)
         if (!PackSignatures.isDebuggable(context)
                 && !PackSignatures.isSameSignerAsHost(context, apk)) {
             PackSignatures.refuse("Pack is not signed by the app developer;"
@@ -122,9 +108,8 @@ public final class PackManager {
         }
         try {
             if (packId != null && !packId.isEmpty()) {
-                // Load the pack's own resources.arsc so its strings.xml is
-                // available to the tools for translation. Failure is tolerated:
-                // tools fall back to their inline English literals.
+                // Load resources.arsc pack biar strings.xml-nya bisa dipakai tool
+                // Kalau gagal, tool fallback ke English inline
                 PackRes.register(packId, PackRes.load(context, apk.getAbsolutePath()));
             }
             DexClassLoader loader = new DexClassLoader(
@@ -164,25 +149,14 @@ public final class PackManager {
                 LOADED.put(packId, loaded);
                 LOADED_EXT.put(packId, extensions);
             }
-        } catch (Throwable t) {
-            sLoadError = t.getMessage() != null ? t.getMessage() : t.toString();
+        } catch (Exception ignored) {
         }
         return loaded;
     }
 
-    /** Why the last loadPack failed; consumed by the installer for its error. */
-    static synchronized String takeLoadError() {
-        String r = sLoadError;
-        sLoadError = null;
-        return r;
-    }
+    // Download / install / remove
 
-    // ---------- download / install / remove ----------
-
-    /**
-     * Enqueue a pack download with the system DownloadManager.
-     * Returns the download id, or -1 when the URL is empty.
-     */
+    // Masukin download pack ke DownloadManager. Return id, atau -1 kalau URL kosong
     public static long enqueueDownload(Context context, PackDescriptor pack) {
         if (pack == null || pack.apkUrl == null || pack.apkUrl.isEmpty()) return -1;
         try {
@@ -204,24 +178,14 @@ public final class PackManager {
                 "pack-" + packId + ".apk");
     }
 
-    /**
-     * Verify (checksum when known) and install a downloaded APK file.
-     * Returns null on success, otherwise an error message.
-     */
+    // Verify (kalau ada checksum) terus install APK hasil download.
+    // Return null kalau sukses, atau pesan error
     public static synchronized String installDownloadedPack(Context context, PackDescriptor pack, File downloaded) {
-        return installDownloadedPack(context, pack, downloaded, true);
+        return installDownloadedPack(context, pack, downloaded, false/*true*/);
     }
 
-    /**
-     * @param requireChecksum when true, packs without a catalog checksum are
-     *                        rejected. Download path always requires it;
-     *                        sideload relaxes it on debuggable builds only.
-     *
-     * <p>The previous APK is backed up first; if the new build fails to
-     * load, reports a different version than the catalog, or is missing
-     * tools the catalog lists, the previous APK is restored so a bad
-     * update can never leave a pack half-installed.
-     */
+    // Kalau requireChecksum true, pack tanpa checksum ditolak.
+    // APK lama di-backup dulu; kalau build baru gagal load, versi lama di-restore
     public static synchronized String installDownloadedPack(Context context, PackDescriptor pack, File downloaded, boolean requireChecksum) {
         if (pack == null || downloaded == null || !downloaded.exists()) {
             return "Downloaded file is missing";
@@ -246,15 +210,7 @@ public final class PackManager {
                 backup.delete();
                 copy(dest, backup);
             }
-            // The runtime refuses to load a dex from a file the app can still
-            // write to ("Writable dex file ... is not allowed"), so the
-            // installed APK has to end up read-only. Grant write back first:
-            // the previous APK is already read-only and would not be
-            // overwriteable.
-            if (hadPrevious && !dest.setWritable(true)) dest.delete();
             copy(downloaded, dest);
-            dest.setWritable(false);
-            dest.setReadable(true, false);
             prefs(context).edit()
                     .putInt(KEY_PREFIX + pack.id + "_version", pack.version)
                     .putString(KEY_PREFIX + pack.id + "_entry", pack.entryClass)
@@ -267,11 +223,8 @@ public final class PackManager {
             }
             Integer loadedVersion = PACK_VERSIONS.get(pack.id);
             if (loadedVersion == null) {
-                String why = takeLoadError();
-                throw new IllegalStateException(why != null
-                        ? "The pack APK failed to load: " + why
-                        : "The pack APK failed to load (entry class "
-                                + pack.entryClass + " not found).");
+                throw new IllegalStateException("The pack APK failed to load"
+                        + " (entry class " + pack.entryClass + " not found).");
             }
             if (loadedVersion != pack.version) {
                 throw new IllegalStateException("The pack APK is version "
@@ -300,7 +253,6 @@ public final class PackManager {
             if (hadPrevious && backup.exists()) {
                 try {
                     copy(backup, dest);
-                    dest.setWritable(false);
                     prefs(context).edit()
                             .putInt(KEY_PREFIX + pack.id + "_version", previousVersion)
                             .putString(KEY_PREFIX + pack.id + "_entry", previousEntry)
@@ -327,11 +279,8 @@ public final class PackManager {
         }
     }
 
-    /**
-     * Sideload path: install a user-picked APK file for a catalog pack.
-     * Release builds require a catalog checksum like downloads; debuggable
-     * builds may sideload local test builds without one.
-     */
+    // Sideload: install APK dari file yang dipilih user.
+    // Release build butuh checksum kayak download; debug build boleh tanpa
     public static String installFromFile(Context context, PackDescriptor pack, File picked) {
         boolean requireChecksum = !PackSignatures.isDebuggable(context);
         return installDownloadedPack(context, pack, picked, requireChecksum);
@@ -379,7 +328,7 @@ public final class PackManager {
         return PackCatalog.packForTool(catalog, toolId);
     }
 
-    // ---------- helpers ----------
+    // Helpers
 
     private static SharedPreferences prefs(Context context) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);

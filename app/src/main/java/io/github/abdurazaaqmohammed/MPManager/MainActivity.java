@@ -60,7 +60,6 @@ import io.github.abdurazaaqmohammed.features.files.FtpController;
 import io.github.abdurazaaqmohammed.features.files.MultiSelectController;
 import io.github.abdurazaaqmohammed.features.files.MainSettingsActivity;
 import io.github.abdurazaaqmohammed.features.files.NavigationHistoryEntry;
-import io.github.abdurazaaqmohammed.features.files.PaneHighlightController;
 import io.github.abdurazaaqmohammed.features.files.PaneNavigationController;
 import io.github.abdurazaaqmohammed.features.files.SidebarController;
 import io.github.abdurazaaqmohammed.features.files.SortFilterController;
@@ -102,6 +101,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -112,6 +112,7 @@ import io.github.abdurazaaqmohammed.MPManager.shizuku.ShizukuShell;
 import io.github.abdurazaaqmohammed.adapters.FtpFilesArrayAdapter;
 import io.github.abdurazaaqmohammed.adapters.HistoryAdapter;
 import io.github.abdurazaaqmohammed.domain.files.ZipEntryInfo;
+import io.github.abdurazaaqmohammed.domain.files.ArchiveEntryInfo;
 import io.github.abdurazaaqmohammed.adapters.main.MainFilesArrayAdapter;
 import io.github.abdurazaaqmohammed.player.ImageViewerActivity;
 import io.github.abdurazaaqmohammed.player.MediaPlayerActivity;
@@ -119,6 +120,7 @@ import io.github.abdurazaaqmohammed.player.MiniPlayerDialog;
 import io.github.abdurazaaqmohammed.player.PlayerManager;
 import io.github.abdurazaaqmohammed.ui.UIHelper;
 import io.github.abdurazaaqmohammed.utils.AccessManager;
+import io.github.abdurazaaqmohammed.utils.ArchiveUtil;
 import io.github.abdurazaaqmohammed.utils.CopyUtil;
 import io.github.abdurazaaqmohammed.utils.DialogUtil;
 import io.github.abdurazaaqmohammed.utils.ErrorUtil;
@@ -127,6 +129,7 @@ import io.github.abdurazaaqmohammed.utils.ProgressManager;
 import io.github.abdurazaaqmohammed.utils.RootManager;
 import io.github.abdurazaaqmohammed.utils.RootPermissionHelper;
 import io.github.abdurazaaqmohammed.utils.SignWrapper;
+import io.github.abdurazaaqmohammed.utils.StreamingArchiveReader;
 import io.github.abdurazaaqmohammed.utils.UiPrefs;
 import io.github.abdurazaaqmohammed.utils.UpdateUtil;
 import io.github.codehasan.colorpicker.PreferencesDialogFragment;
@@ -144,6 +147,10 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
 
     private static WeakReference<MainActivity> CURRENT = new WeakReference<>(null);
 
+    // Cache daftar arsip
+    private static final Map<String, java.util.List<ArchiveEntryInfo>> ARCHIVE_CACHE = new HashMap<>();
+    private static final java.util.Set<String> ARCHIVE_CACHE_COMPLETE = new java.util.HashSet<>();
+
     public static MainActivity current() {
         return CURRENT.get();
     }
@@ -155,6 +162,9 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     public File pane1Folder;
     public File pane2Folder;
     public int lastPaneSelected = 1;
+    // Simpan folder asal pas buka arsip sementara
+    private File tempViewOriginFolder = null;
+    private boolean tempViewOriginPane1 = true;
     public DialogUtil dialogUtil;
     public UIHelper uiHelper;
     private final PaneNavigationController navigation = new PaneNavigationController(this);
@@ -182,7 +192,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     private final FtpController ftp = new FtpController(this);
     private final ApkResultHandler apkResults = new ApkResultHandler(this);
     private final UpdateController updates = new UpdateController(this);
-    private final PaneHighlightController paneHighlight = new PaneHighlightController(this);
 
     public ActivityResultLauncher<String> permissionLauncher() {
         return requestPermissionLauncher;
@@ -283,6 +292,11 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     @Override
     protected void onPause() {
         super.onPause();
+        // Jangan cleanup cache di onPause pas video jalan — cleanup cuma di exitTempView/onBackPressed
+        // Cache tetap dipakai selama background play
+        if (isBackgroundPlayActive || isPreviewingFromArchive) {
+            android.util.Log.i("CacheCleanup", "SKIP — background play aktif");
+        }
         updates.unregister();
         SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(this);
         settings.edit()
@@ -334,9 +348,8 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         if (resultCode == 0) if (doesNotHaveStoragePerm(this)) {
             Extensions.showMessage(this, R.string.storage_perm_needed);
         } else {
-            // Editor was closed without returning a modified file (back press /
-            // discard in ARSC, text or dex editors). Refresh the listing in place;
-            // recreate() would drop the user back at the home folder.
+            // Editor ditutup tanpa save (back / batal di ARSC/teks/dex).
+            // Refresh list aja, jangan recreate() — nanti balik ke folder awal.
             try {
                 refreshPane(lastPaneSelected == 1);
             } catch (Exception ignored) {
@@ -391,9 +404,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         multiSelect.onPaneTouched(pane);
     }
 
-
-
-
     private void setupSidebar() {
         sidebar.setupSidebar();
     }
@@ -406,7 +416,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         sidebar.refreshSidebar(sectionOrder);
     }
 
-    /** Sidebar shortcut: screen color picker service. Called by SidebarController. */
+    // Sidebar: color picker
     public void openColorPickerTool() {
         if (Build.VERSION.SDK_INT < 24) return;
         PreferencesDialogFragment dialogFragment = new PreferencesDialogFragment();
@@ -441,7 +451,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         });
     }
 
-    /** Sidebar shortcut: layout inspector service. Called by SidebarController. */
+    // Sidebar: layout inspector
     public void openLayoutInspectorTool() {
         if (Build.VERSION.SDK_INT < 20) return;
         if (DataRepository.getInstance().getAppState().isRunning()) {
@@ -488,7 +498,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
     }
 
-    /** Bookmarks state, forwarded to BookmarksController (used by SidebarController). */
+    // Bookmarks state buat sidebar
     public List<String> bookmarkGroups() {
         return bookmarksUI.bookmarkGroups();
     }
@@ -526,7 +536,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             int currentNightMode = newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK;
             if (currentNightMode == Configuration.UI_MODE_NIGHT_YES) {
                 if (theme != R.style.Theme_MyApp_Dark) {
-                    // BaseActivity re-applies the SYSTEM_DEFAULT plugin on recreate.
+                    // BaseActivity re-apply tema default pas recreate
                     theme = R.style.Theme_MyApp_Dark;
                     recreate();
                 }
@@ -582,7 +592,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }
     });
 
-    /** Launches an external file-plugin activity; result goes to cb (may be null). */
+    // Launch plugin activity, hasil ke cb (bisa null)
     public void launchExternalFile(Intent intent, Consumer<ActivityResult> cb) {
         try {
             pendingExternalFile = cb;
@@ -604,7 +614,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }
     });
 
-    /** Launches an external APK-plugin activity; result goes to cb (may be null). */
+    // Launch plugin APK, hasil ke cb (bisa null)
     public void launchExternalApk(Intent intent, Consumer<ActivityResult> cb) {
         try {
             pendingExternalApk = cb;
@@ -614,7 +624,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }
     }
 
-    /** Launches an external setting config activity; result goes to cb (may be null). */
+    // Launch setting plugin, hasil ke cb (bisa null)
     public void launchExternalSetting(Intent intent, Consumer<ActivityResult> cb) {
         try {
             pendingExternalSetting = cb;
@@ -636,8 +646,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }});
 
     private void setupSystemBars() {
-        // Global insets are applied in BaseActivity.
-
+        // Inset global diurus BaseActivity
 
         boolean lightBars;
         String pluginId = ThemeRegistry.getCurrentId(this);
@@ -652,7 +661,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             getWindow().setStatusBarColor(surfaceColor);
             getWindow().setNavigationBarColor(surfaceColor);
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M && lightBars) {
-                // Old devices can't render dark status bar icons; use a dark bar so icons stay visible
+                // HP jadul gak support ikon gelap, pakai bar gelap
                 int darkBar = MaterialColors.getColor(this, com.google.android.material.R.attr.colorPrimary, surfaceColor);
                 getWindow().setStatusBarColor(darkBar);
                 getWindow().setNavigationBarColor(darkBar);
@@ -663,11 +672,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         controller.setAppearanceLightNavigationBars(lightBars);
     }
 
-    /**
-     * One-time upgrade from legacy theme storage (boolean "systemTheme" +
-     * int style-res "theme") to ThemeRegistry's string id. Runs before
-     * BaseActivity applies the theme so first launch after update is correct.
-     */
+    // Migrasi theme lama ke ThemeRegistry (jalan sebelum BaseActivity apply theme)
     private void upgradeThemePrefsIfNeeded() {
         try {
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
@@ -690,8 +695,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     protected void onCreate(Bundle savedInstanceState) {
         upgradeThemePrefsIfNeeded();
         super.onCreate(savedInstanceState);
-        // BaseActivity applied the ThemeRegistry plugin; sync legacy fields for
-        // status-bar tinting, icon colors and intent extras during transition.
+        // Sinkron field lama buat status bar, ikon, dan intent extras
         theme = ThemeRegistry.currentStyleRes(this);
         systemTheme = BuiltInThemes.SYSTEM_DEFAULT_ID.equals(ThemeRegistry.getCurrentId(this));
         SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(this);
@@ -700,13 +704,27 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         //WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
 
         setContentView(R.layout.activity_main);
+
+        // Test native sementara
+        try {
+            String nativeMsg = io.github.abdurazaaqmohammed.utils.NativeTest.helloFromC();
+            String nativeInfo = io.github.abdurazaaqmohammed.utils.NativeTest.getNativeInfo();
+            android.util.Log.i("MP-Native", "Test OK: " + nativeMsg);
+            android.util.Log.i("MP-Native", "Info: " + nativeInfo);
+
+            boolean nativeArchiveAvailable = io.github.abdurazaaqmohammed.utils.NativeArchiveReader.isAvailable();
+            android.util.Log.i("MP-Native", "NativeArchiveReader available: " + nativeArchiveAvailable);
+        } catch (Throwable t) {
+            android.util.Log.e("MP-Native", "Native test FAILED", t);
+        }
+
         setupSystemBars();
-        paneHighlight.attach();
         checkStoragePerm();
+        // Startup: bersihin cache kalau lewat 1 GB
+        new Thread(this::startupCacheCleanup).start();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) mediaProjectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        // App language is applied by AppCompatDelegate per-app locales
-        // (see SettingsController.setupLanguageSettings + res/xml/locales_config.xml).
-        // System locale automatically picks values / values-es / values-ru / values-zh-rCN.
+        // Bahasa app diatur AppCompatDelegate
+        // System locale otomatis pilih values/values-es/dll
         rss = getResources();
 
         new Thread(() -> {
@@ -765,9 +783,9 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             sidebarDrawer.setClipToOutline(true);
         }
         bottomSheetBehavior = BottomSheetBehavior.from(findViewById(R.id.bookmarks_drawer));
-        bottomSheetBehavior.setPeekHeight(0, false); // animate=false, keeps it hidden
-        bottomSheetBehavior.setHideable(true); // allows fully hidden state
-        bottomSheetBehavior.setState(BottomSheetBehavior.STATE_HIDDEN); // truly hidden at start
+        bottomSheetBehavior.setPeekHeight(0, false);
+        bottomSheetBehavior.setHideable(true);
+        bottomSheetBehavior.setState(BottomSheetBehavior.STATE_HIDDEN);
 
         bottomSheetBehavior.addBottomSheetCallback(new BottomSheetBehavior.BottomSheetCallback() {
             @Override
@@ -819,14 +837,14 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                 new GestureDetector.SimpleOnGestureListener() {
                     @Override
                     public boolean onDown(@NonNull MotionEvent e) {
-                        return true; // MUST return true to receive subsequent events
+                        return true; // Harus return true biar dapet event berikutnya
                     }
 
                     @Override
                     public boolean onFling(MotionEvent e1, @NonNull MotionEvent e2,
                                            float velocityX, float velocityY) {
-                        // upward movement (px)
-                        if (e1 != null && e1.getY() - e2.getY() > 50 && velocityY < -200) { // negative = upward velocity
+                        // gerakan ke atas (px)
+                        if (e1 != null && e1.getY() - e2.getY() > 50 && velocityY < -200) { // negatif = ke atas
                             openBookmarksDrawer();
                             return true;
                         }
@@ -876,8 +894,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             return false;
         });
 
-
-
         pane2.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 if (lastPaneSelected != 2) setCurrentPane(2);
@@ -894,17 +910,23 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                 return false;
             });
             currentFolderView.setOnClickListener(v -> {
-                View textInputLayout = LayoutInflater.from(this).inflate(R.layout.material_edittext, null);//new TextInputLayout(this, null, com.google.android.material.R.style.Widget_MaterialComponents_TextInputLayout_OutlinedBox);
+                View textInputLayout = LayoutInflater.from(this).inflate(R.layout.material_edittext, null);
                 EditText input = textInputLayout.findViewById(R.id.m_et_edittext);
                 input.setText(((TextView) v).getText());
                 AlertDialog ad = dialogUtil.getDialogBuilder()
                         .setTitle(R.string.path)
                         .setView(textInputLayout)
                         .setNegativeButton(android.R.string.cancel, null)
-                        .setNeutralButton(android.R.string.paste, null) // Note: Need to set it after otherwise the dialog auto close
+                        .setNeutralButton(android.R.string.paste, null) // Setelah, kalau nggak dialog langsung close
                         .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-                            File inputPath = new File(input.getText().toString());
-                            boolean canOpen = inputPath.exists() && inputPath.isDirectory() || (!inputPath.exists() && inputPath.mkdirs());
+                            String inputStr = input.getText().toString().trim();
+                            File inputPath = new File(inputStr);
+                            boolean canOpen = inputPath.exists() && inputPath.isDirectory()
+                                    || (!inputPath.exists() && inputPath.mkdirs())
+                                    || "/".equals(inputStr)
+                                    || "/storage".equals(inputStr)
+                                    || "/storage/emulated".equals(inputStr)
+                                    || "/storage/self".equals(inputStr);
                             if (!canOpen) {
                                 try {
                                     String abs = inputPath.getAbsolutePath();
@@ -959,7 +981,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                             else if (mkdirViaRoot(ogFolder, inputStr)) loadFolderInPane(ogFolder, isPane1);
                             else Extensions.showMessage(MainActivity.this, rss.getString(R.string.failed_to_create_folder, inputStr));
                         })
-                        .setNeutralButton(android.R.string.paste, null) // Note: Need to set it after otherwise the dialog auto close
+                        .setNeutralButton(android.R.string.paste, null) // Setelah, kalau nggak dialog langsung close
                         .setPositiveButton(rss.getString(R.string.file), (dialog, which) -> {
                             boolean isPane1 = lastPaneSelected == 1;
                             File ogFolder = isPane1 ? pane1Folder : pane2Folder;
@@ -983,7 +1005,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                     if (selectionStart != selectionEnd) {
                         input.getText().delete(selectionStart, selectionEnd);
                         input.getText().insert(selectionStart, text);
-                    } else if(selectionEnd == -1) { // Empty
+                    } else if(selectionEnd == -1) { // Kosong
                         input.setText(text);
                     }
                 });
@@ -1159,7 +1181,17 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                             File parentInZip = new File(adapter.currentZipPath).getParentFile();
                             loadZipFolderInPane(zipFile, parentInZip != null ? parentInZip.getPath() : "", isPane1, true);
                         }
-                    } else loadFolderInPane((File) adapter.getItem(0), isPane1);
+                    } else {
+                        File current = isPane1 ? pane1Folder : pane2Folder;
+                        File target = current != null ? current.getParentFile() : (File) adapter.getItem(0);
+                        while (target != null && !canOpenFolder(target)) {
+                            File pp = target.getParentFile();
+                            if (pp == null) break;
+                            target = pp;
+                        }
+                        if (target != null && canOpenFolder(target)) loadFolderInPane(target, isPane1);
+                        else loadFolderInPane((File) adapter.getItem(0), isPane1);
+                    }
                 } else {
                     ftp.ftpParent(isPane1);
                 }
@@ -1255,10 +1287,28 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                             boolean inOneLevelInZip = i < 2;
                             loadZipFolderInPane(((ZipEntryInfo)adapter.values[0]).getZipFile(), inOneLevelInZip ? "" : s.substring(0, s.lastIndexOf('/', s.lastIndexOf('/') - 1)), adapter.pane1, true);
                         } else {
+                            // Reset flag preview
+                            isPreviewingFromArchive = false;
+                            // Bersihin cache pas keluar arsip
+                            new Thread(MainActivity.this::cleanupArchiveTemp).start();
+
+                            // Dari temp view balik ke folder asal
+                            File currentDir = lastPaneSelected == 1 ? pane1Folder : pane2Folder;
+                            if (isTempViewFolder(currentDir)) {
+                                exitTempView(lastPaneSelected == 1);
+                                return;
+                            }
                             String path = this.<TextView>findViewById(R.id.currentFolderPath).getText().toString();
                             File f = new File(path).getParentFile();
-                            if (f != null && (f.canRead() || canListViaRoot(f))) loadFolderInPane(f, lastPaneSelected == 1);
-                            else if (isBackPressedToExit) {
+                            // Skip folder yang gak kebaca sampai nemu yang bisa dibuka
+                            while (f != null && !canOpenFolder(f)) {
+                                File pp = f.getParentFile();
+                                if (pp == null) break;
+                                f = pp;
+                            }
+                            if (f != null && canOpenFolder(f)) {
+                                loadFolderInPane(f, lastPaneSelected == 1);
+                            } else if (isBackPressedToExit) {
                                 handler.removeCallbacks(resetExitPrompt);
                                 finishAffinity();
                             } else {
@@ -1293,7 +1343,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         navigation.refresh();
     }
 
-    // PaneNavigationController.Host: view/loading access for the controller.
+    // Host buat PaneNavigationController (view + loading)
 
     @Override
     public void loadFolder(File folder, boolean pane1, boolean addToHistory) {
@@ -1336,24 +1386,41 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             loadFtpFolderInPane((FTPFileWrapper) folder, pane1);
             return;
         }
-        if (folder.getName().endsWith(".zip")) {
+        // Parent temp view balik ke folder asal
+        if (tempViewOriginFolder != null && isTempViewParentFolder(folder)) {
+            File origin = tempViewOriginFolder;
+            tempViewOriginFolder = null;
+            loadFolderInPane(origin, pane1, addToHistory);
+            return;
+        }
+        if (!folder.isDirectory() && folder.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".zip")) {
             loadZipFolderInPane(folder, "", pane1, addToHistory);
             return;
         }
         boolean shizukuDir = ShizukuFile.isAndroidDataPath(folder);
         File[] files = null;
         String folderPath = folder.getAbsolutePath();
-        boolean rootListingPath = "/".equals(folderPath) || RootManager.isRootOnlyPath(folderPath);
+
+        // SELinux blokir readdir di "/", "/storage/emulated", "/storage/self".
+        // Bikin listing palsu biar user bisa masuk ke subfolder yang kebaca.
+        if ("/".equals(folderPath)) {
+            files = syntheticRootListing();
+        } else if ("/storage".equals(folderPath)) {
+            files = syntheticStorageListing();
+        } else if ("/storage/emulated".equals(folderPath)) {
+            files = syntheticEmulatedListing();
+        } else if ("/storage/self".equals(folderPath)) {
+            files = syntheticSelfListing();
+        }
+
+        boolean rootListingPath = !"/".equals(folderPath) && RootManager.isRootOnlyPath(folderPath);
         if (rootListingPath && AccessManager.active(this) == AccessManager.Backend.ROOT && AccessManager.fileOpsOn(this)) {
             files = AccessManager.listWithStat(this, folder.getAbsolutePath());
             if (files != null) files = Arrays.stream(files).filter(this::isNotHidden).toArray(File[]::new);
         }
         if (files == null) files = folder.listFiles(this::isNotHidden);
-        // A folder the app cannot read may still be listable (read-only) through the shell:
-        // Android/data on API 30+, plus browsable system paths like /storage/emulated and
-        // /system. Retry via Shizuku, then root, when the app got nothing or an empty
-        // listing from a folder it cannot write to (an empty listing there means the OS hid
-        // the contents rather than the folder really being empty).
+        // Folder yang gak kebaca tetep bisa di-list via shell (Android/data, /storage/emulated, /system).
+        // Coba Shizuku dulu, terus root, kalau listing kosong.
         boolean appListingIncomplete = files == null || (files.length == 0 && !canWriteNormally(folder));
         if (appListingIncomplete) {
             File[] viaShizuku = ShizukuFile.tryList(this, folder);
@@ -1427,7 +1494,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                 cbDexProfile.setChecked(bo.dexProfile);
 
                 if (bo.resDirName != null) etResDir.setText(bo.resDirName);
-                SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(this);
+                SharedPreferences settings = android.preference.PreferenceManager.getDefaultSharedPreferences(this);
                 final boolean[] sign = new boolean[1];
                 CheckBox autosign = content.findViewById(R.id.autosign);
                 autosign.setChecked(sign[0] = settings.getBoolean("autosign", true));
@@ -1494,12 +1561,93 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         RecyclerView pane = findViewById(pane1 ? R.id.listViewPane1 : R.id.listViewPane2);
         File parent = folder.getParentFile() != null ? folder.getParentFile() : folder;
         pane.setAdapter(new MainFilesArrayAdapter(this, files, parent, pane1, false, null));
-        // Fresh listing = no selection in this pane; sync the bottom bar if it's current.
+        // List baru: clear pilihan, update toolbar pane aktif
         if ((pane1 ? lastPaneSelected == 1 : lastPaneSelected == 2)) setMultiSelectModeUI(false);
         updateNavigationButtons();
     }
 
+    // Paths under "/" yang di-fabricate karena SELinux blokir readdir
+    private static final String[] SYNTHETIC_ROOT_PATHS = {
+            "/acct", "/apex", "/bin", "/bugreports", "/cache", "/config",
+            "/data", "/debug_ramdisk", "/dev", "/etc", "/linkerconfig",
+            "/metadata", "/mnt", "/oem", "/postinstall", "/proc",
+            "/product", "/sdcard", "/storage", "/sys", "/system",
+            "/system_ext", "/vendor"
+    };
+
+    // SELinux blokir readdir("/"), jadi kita bikin listing sendiri
+    private File[] syntheticRootListing() {
+        List<File> list = new ArrayList<>();
+        for (String p : SYNTHETIC_ROOT_PATHS) {
+            File f = new File(p);
+            if (f.exists()) list.add(f);
+        }
+        return list.toArray(new File[0]);
+    }
+
+    // /storage isinya emulated, self, sama SD card. Tampilin semua biar bisa masuk
+    private File[] syntheticStorageListing() {
+        List<File> list = new ArrayList<>();
+        list.add(new File("/storage/emulated"));
+        list.add(new File("/storage/self"));
+        File[] candidates = new File("/storage").listFiles();
+        if (candidates != null) {
+            for (File f : candidates) {
+                String name = f.getName();
+                if ("emulated".equals(name) || "self".equals(name)) continue;
+                if (f.isDirectory()) list.add(f);
+            }
+        }
+        return list.toArray(new File[0]);
+    }
+
+    // /storage/emulated/0 = internal storage utama. Tampilin profil user lain juga
+    private File[] syntheticEmulatedListing() {
+        List<File> list = new ArrayList<>();
+        File zero = new File("/storage/emulated/0");
+        if (zero.exists() || zero.isDirectory()) list.add(zero);
+        File[] real = new File("/storage/emulated").listFiles();
+        if (real != null) {
+            for (File f : real) {
+                if (!"0".equals(f.getName()) && f.isDirectory()) list.add(f);
+            }
+        }
+        return list.toArray(new File[0]);
+    }
+
+    // /storage/self symlink ke /storage/emulated. Tampilin "0"
+    private File[] syntheticSelfListing() {
+        List<File> list = new ArrayList<>();
+        File zero = new File("/storage/emulated/0");
+        if (zero.exists() || zero.isDirectory()) list.add(zero);
+        return list.toArray(new File[0]);
+    }
+
+    // Cek apakah folder bisa dibuka (via filesystem, root, atau listing palsu)
+    private boolean canOpenFolder(File f) {
+        if (f == null) return false;
+        String abs = f.getAbsolutePath();
+        if ("/".equals(abs)) return true;
+        if ("/storage".equals(abs)) return true;
+        if ("/storage/emulated".equals(abs)) return true;
+        if ("/storage/self".equals(abs)) return true;
+        if (f.canRead()) return true;
+        try {
+            if (canListViaRoot(f)) return true;
+        } catch (Exception ignored) {
+        }
+        for (String p : SYNTHETIC_ROOT_PATHS) {
+            if (p.equals(abs)) return true;
+        }
+        return false;
+    }
+
     public void loadZipFolderInPane(File zipFile, String path, boolean pane1, boolean addToHistory) {
+        // Buka lewat loadFolderInPane biar gak kena EISDIR
+        if (zipFile != null && zipFile.isDirectory()) {
+            loadFolderInPane(zipFile, pane1, addToHistory);
+            return;
+        }
         try {
             List<ZipEntryInfo> entries = new ArrayList<>();
             ZipEntryInfo parent = null;
@@ -1519,26 +1667,26 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                 }
 
                 List<FileHeader> fhs = zf.getFileHeaders();
-                String prefix = parentPath; // already normalized with trailing slash if non-empty
+                String prefix = parentPath; // udah dinormalisasi, ada trailing slash
                 for (FileHeader fh : fhs) {
                     String entryPath = fh.getFileName().replace('\\','/');
                     if (!entryPath.startsWith(prefix) || entryPath.equals(prefix)) continue;
-                    String rest = entryPath.substring(prefix.length()); // e.g., "subdir/file" or "file.txt" or "subdir/"
-                    // direct child if rest has no further '/'
+                    String rest = entryPath.substring(prefix.length()); // misal "subdir/file" atau "file.txt"
+                    // direct child kalau gak ada '/' lagi
                     int nextSlash = rest.indexOf('/');
                     if (nextSlash == -1) {
-                        // file directly inside current folder
+                        // file langsung di folder ini
                         ZipEntryInfo info = new ZipEntryInfo(fh, zipFile, path);
                         if (isNotHidden(info)) entries.add(info);
                     } else {
-                        // it's inside a subdirectory; we should add a single synthetic directory entry for that subdir
-                        String childDirName = rest.substring(0, nextSlash + 1); // include trailing slash
-                        String childFullPath = prefix + childDirName; // full path of the child dir
-                        // add only once: track seen dirs with a Set<String>
+                        // di subfolder, tambahin entry folder synthetic
+                        String childDirName = rest.substring(0, nextSlash + 1); // plus trailing slash
+                        String childFullPath = prefix + childDirName; // path lengkap child dir
+                        // Cuma sekali, track pakai Set
                         if (seenDirs.add(childFullPath)) {
                             FileHeader syntheticDir = new FileHeader();
                             syntheticDir.setFileName(childFullPath);
-                            ZipEntryInfo info = new ZipEntryInfo(syntheticDir, zipFile, path); // or use new ctor
+                            ZipEntryInfo info = new ZipEntryInfo(syntheticDir, zipFile, path);
                             if (isNotHidden(info)) entries.add(info);
                         }
                     }
@@ -1565,12 +1713,198 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             boolean isCurrentPane = pane1 ? lastPaneSelected == 1 : lastPaneSelected == 2;
             handler.post(() -> {
                 pane.setAdapter(new MainFilesArrayAdapter(this, entries.toArray(new ZipEntryInfo[0]), finalParent, pane1, true, path));
-                // Fresh listing = no selection in this pane; sync the bottom bar if it's current.
+                // List baru: clear pilihan, update toolbar
                 if (isCurrentPane) setMultiSelectModeUI(false);
                 updateNavigationButtons();
             });
         } catch (IOException e) {
             new ErrorUtil(this).showError(e);
+        }
+    }
+
+    private boolean isNonZipArchive(String lower) {
+        return lower.endsWith(".rar") || lower.endsWith(".7z") ||
+               lower.endsWith(".tar") || lower.endsWith(".tar.gz") || lower.endsWith(".tgz") ||
+               lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") ||
+               lower.endsWith(".tar.xz") || lower.endsWith(".txz") ||
+               lower.endsWith(".gz") || lower.endsWith(".bz2") || lower.endsWith(".xz");
+    }
+
+    // Streaming archive: baca header doang
+    public void loadStreamingArchive(File archive, String path, boolean pane1, boolean addToHistory) {
+        // Hapus cache pas pindah arsip
+        prepareCacheForArchive(archive.getAbsolutePath());
+
+        final String cacheKey = archive.getAbsolutePath();
+        final String normalizedPath = (path == null) ? "" : path;
+        final boolean isRoot = normalizedPath.isEmpty();
+
+        // Pakai cache kalau ada
+        if (ARCHIVE_CACHE_COMPLETE.contains(cacheKey)) {
+            java.util.List<ArchiveEntryInfo> cached = ARCHIVE_CACHE.get(cacheKey);
+            if (cached != null) {
+                showStreamingEntries(archive, cached, normalizedPath, pane1, isRoot);
+                return;
+            }
+        }
+
+        // Belum ada cache, baca native
+        ProgressManager pm = new ProgressManager(this, true).show();
+        pm.setText("Reading " + archive.getName() + "...");
+        new Thread(() -> {
+            try {
+                // Baca semua entry sekali
+                List<ArchiveEntryInfo> allEntries = StreamingArchiveReader.listEntries(archive, "");
+
+                // Simpan ke cache
+                ARCHIVE_CACHE.put(cacheKey, allEntries);
+                ARCHIVE_CACHE_COMPLETE.add(cacheKey);
+
+                pm.dismiss();
+
+                // Tampilin entry sesuai path
+                showStreamingEntries(archive, allEntries, normalizedPath, pane1, isRoot);
+            } catch (Exception e) {
+                pm.dismiss();
+                new ErrorUtil(this).showError(e);
+            }
+        }).start();
+    }
+
+    // Tampilin entries dari cache
+    private void showStreamingEntries(File archive, List<ArchiveEntryInfo> allEntries, String path, boolean pane1, boolean isRoot) {
+        final String normalizedPath = (path == null) ? "" : path;
+        final String prefix = normalizedPath.isEmpty() ? "" : (normalizedPath.endsWith("/") ? normalizedPath : normalizedPath + "/");
+
+        // Filter by path — cuma direct children
+        List<ArchiveEntryInfo> entries = new java.util.ArrayList<>();
+        java.util.Set<String> seenDirs = new java.util.HashSet<>();
+
+        for (ArchiveEntryInfo entry : allEntries) {
+            String entryPath = entry.getFullPath();
+            if (entryPath == null) continue;
+            if (!entryPath.startsWith(prefix) || entryPath.equals(prefix)) continue;
+
+            String rest = entryPath.substring(prefix.length());
+            if (rest.isEmpty()) continue;
+
+            int slash = rest.indexOf('/');
+            if (slash < 0) {
+                // File
+                entries.add(entry);
+            } else {
+                // Folder
+                String dirName = rest.substring(0, slash + 1);
+                String dirFull = prefix + dirName;
+                if (seenDirs.add(dirFull)) {
+                    entries.add(new ArchiveEntryInfo(dirName, dirFull, 0L, 0L, true, archive, entry.getArchiveType()));
+                }
+            }
+        }
+
+        // Tambah ".." kalau bukan root
+        if (!isRoot) {
+            String parentPath = "";
+            String cleanPath = normalizedPath.replaceAll("/+$", "");
+            int lastSlash = cleanPath.lastIndexOf('/');
+            if (lastSlash >= 0) parentPath = cleanPath.substring(0, lastSlash);
+
+            // Cek duplikat ".."
+            boolean hasParent = false;
+            for (ArchiveEntryInfo e : entries) {
+                if ("..".equals(e.getName())) { hasParent = true; break; }
+            }
+            if (!hasParent) {
+                entries.add(0, new ArchiveEntryInfo("..", parentPath, 0L, 0L, true, archive, "parent"));
+            }
+        }
+
+        handler.post(() -> {
+            if (pane1) {
+                pane1Folder = archive;
+            } else {
+                pane2Folder = archive;
+            }
+            setCurrentFolder(archive.getPath() + "!" + normalizedPath, entries);
+
+            RecyclerView pane = findViewById(pane1 ? R.id.listViewPane1 : R.id.listViewPane2);
+            pane.setAdapter(new MainFilesArrayAdapter(this,
+                    entries.toArray(new ArchiveEntryInfo[0]),
+                    archive, pane1, false, normalizedPath));
+            if (pane1 ? lastPaneSelected == 1 : lastPaneSelected == 2) setMultiSelectModeUI(false);
+            updateNavigationButtons();
+        });
+    }
+
+    // Clear cache kalau file berubah
+    public static void clearArchiveCache() {
+        ARCHIVE_CACHE.clear();
+        ARCHIVE_CACHE_COMPLETE.clear();
+    }
+
+    public void loadArchiveInTemp(File archive, boolean pane1, boolean addToHistory) {
+        // Simpan folder asal buat back
+        tempViewOriginFolder = archive.getParentFile();
+        tempViewOriginPane1 = pane1;
+        ProgressManager pm = new ProgressManager(this, true).show();
+        pm.setText("Extracting " + archive.getName() + "...");
+        new Thread(() -> {
+            try {
+                File cache = getCacheDir();
+                // Prefix beda per pane biar gak bentrok
+                final String panePrefix = pane1 ? "view_p1_" : "view_p2_";
+                File[] existing = cache.listFiles(f -> f.getName().startsWith(panePrefix));
+                if (existing != null) for (File f : existing) FileUtil.deleteDirectory(f);
+
+                File tempDir = new File(cache, panePrefix + System.currentTimeMillis());
+                if (!tempDir.mkdirs()) throw new IOException("Cannot create temp dir");
+
+                boolean keepTime = PreferenceManager.getDefaultSharedPreferences(this)
+                        .getBoolean("preserve_mtime", true);
+                ArchiveUtil.extract(archive, tempDir, keepTime);
+
+                pm.dismiss();
+                handler.post(() -> loadFolderInPane(tempDir, pane1, addToHistory));
+            } catch (Exception e) {
+                pm.dismiss();
+                new ErrorUtil(this).showError(e);
+            }
+        }).start();
+    }
+
+    // Cek apakah folder ini parent temp view
+    private boolean isTempViewParentFolder(File folder) {
+        if (folder == null) return false;
+        String path = folder.getAbsolutePath();
+        String cachePath = getCacheDir().getAbsolutePath();
+        if (!path.startsWith(cachePath)) return false;
+        // Kalau folder itu sendiri "cache" → iya
+        if (path.equals(cachePath)) return true;
+        // Kalau di dalam cache tapi bukan view_/nested_ → iya
+        if (path.contains("/view_") || path.contains("/view_p1_") || path.contains("/view_p2_") || path.contains("/nested_")) return false;
+        return true;
+    }
+
+    // Cek apakah folder ini temp view
+    private boolean isTempViewFolder(File folder) {
+        if (folder == null) return false;
+        String path = folder.getAbsolutePath();
+        String cachePath = getCacheDir().getAbsolutePath();
+        return path.startsWith(cachePath + "/view_") || path.startsWith(cachePath + "/view_p1_") || path.startsWith(cachePath + "/view_p2_") || path.equals(cachePath + "/view_");
+    }
+
+    // Balik ke folder asal dari temp view
+    private void exitTempView(boolean pane1) {
+        // Bersihin cache pas keluar arsip
+        new Thread(this::cleanupArchiveTemp).start();
+
+        File origin = tempViewOriginFolder;
+        tempViewOriginFolder = null;
+        if (origin != null && origin.exists()) {
+            loadFolderInPane(origin, pane1);
+        } else {
+            // fallback ke home
+            loadFolderInPane(pane1 ? homeDir1 : homeDir2, pane1);
         }
     }
 
@@ -1586,11 +1920,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }
     }
 
-    /**
-     * True when the app uid itself can write to this directory. Read-only corners such as
-     * /storage/emulated or /system report false here, which is the signal that an empty
-     * listing means "hidden by the OS" and deserves an elevated/Shizuku retry.
-     */
+    // Cek apakah app bisa nulis di folder ini (buat deteksi folder yang di-hide OS)
     private static boolean canWriteNormally(File folder) {
         try {
             return folder != null && folder.canWrite();
@@ -1623,7 +1953,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         }
     }
 
-    /** Nudge to install/start/grant Shizuku when the user hits an Android/data folder without it. */
+    // Kasih tau user install/buka/izin Shizuku kalau buka Android/data
     private void showShizukuGuideOnce(File folder, boolean pane1) {
         boolean installed = ShizukuShell.isInstalled(this);
         String message;
@@ -1642,7 +1972,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             positiveLabel = R.string.shizuku_grant;
             onPositive = () -> ShizukuShell.requestPermission();
         }
-        // Once the binder arrives (user started Shizuku / granted), reload this folder automatically.
+        // Pas Shizuku nyala/izin, otomatis reload folder ini
         ShizukuShell.onBinderReceived(() -> runOnUiThread(() -> {
             if (ShizukuShell.isGranted()) loadFolderInPane(folder, pane1, false);
         }));
@@ -1659,8 +1989,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         if(!TextUtils.isEmpty(contentDescription)) Extensions.showMessage(this, contentDescription);
         return false;
     }
-
-
 
     public void reloadCurrentFolder() {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -1704,9 +2032,8 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         int foldersCount = 0;
         int totalCount;
         if (files != null) {
-            // Count from the already-listed array (root listings carry
-            // isDirectory via RootFile). Re-listing with curr.listFiles()
-            // returns null on root-only dirs and would show 0 folders.
+            // Hitung dari array yang udah ada (root listing bawa isDirectory via RootFile).
+            // Kalau pakai curr.listFiles() bakal null di root-only dirs.
             for (File f : files) {
                 try {
                     if (f != null && f.isDirectory()) foldersCount++;
@@ -1726,7 +2053,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
 
     public void setCurrentPane(int pane) {
         lastPaneSelected = pane;
-        paneHighlight.onPaneSelected(pane, true);
         RecyclerView.Adapter a = getCurrentPane().getAdapter();
         boolean b = a instanceof MainFilesArrayAdapter;
         findViewById(R.id.syncPaneButton).setEnabled(b);
@@ -1736,7 +2062,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
                 setCurrentFolder(adapter.currentZipPath, Arrays.asList(adapter.values));
             } else {
                 File curr = pane == 1 ? pane1Folder : pane2Folder;
-                // ShizukuFile.listFiles() can't list; reuse the entries the adapter already shows.
+                // ShizukuFile.listFiles() gak bisa list, pakai entry dari adapter
                 File[] shown = adapter.getShownFiles();
                 setCurrentFolder(curr, shown != null ? shown : curr.listFiles());
             }
@@ -1747,14 +2073,11 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     public void setSelectedPane(int pane) {
         if (lastPaneSelected == pane) return;
         lastPaneSelected = pane;
-        paneHighlight.onPaneSelected(pane, true);
         updateNavigationButtons();
     }
 
     public void setCurrentFolder(String path, List<?> files) {
         new Thread(() -> {
-
-            //CollectionsUtils.removeIf(files, (Predicate<Object>) o -> o instanceof ZipEntryInfo && ((ZipEntryInfo) o).isDirectory());
             int foldersCount = 0;
             for(Object item : files) {
                 if(item instanceof ZipEntryInfo && ((ZipEntryInfo) item).isDirectory()) foldersCount++;
@@ -1789,12 +2112,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     protected void onResume() {
         super.onResume();
         CURRENT = new WeakReference<>(this);
-        // Pane highlight style may have changed in Settings.
-        try {
-            paneHighlight.attach();
-            paneHighlight.reload();
-        } catch (Exception ignored) {
-        }
         try {
             updates.register();
             String locate = getIntent() == null ? null : getIntent().getStringExtra("locatePath");
@@ -1816,15 +2133,12 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             refreshSidebar(getSidebarSectionOrder());
         } catch (Exception ignored) {
         }
-        // Returning from editors/viewers (started with startActivity, not for result)
-        // leaves listings stale — always re-list the visible panes.
+        // Balik dari editor/viewer bikin listing basi — re-list aja
         try {
             refreshAllPanes();
         } catch (Exception ignored) {
         }
     }
-
-
 
     public static boolean areFilesDifferent(File[] files1, File[] files2) throws IOException {
         if (files1 == null || files2 == null)
@@ -1837,6 +2151,115 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             }
         }
         return false;
+    }
+
+    // Auto-cleanup cache: ganti arsip, keluar, startup, >1GB
+    private String currentArchiveCache = null;
+    // Flag: lagi preview file dari arsip, jangan cleanup single_*
+    private volatile boolean isPreviewingFromArchive = false;
+    // Flag: background play aktif, jangan cleanup cache
+    private volatile boolean isBackgroundPlayActive = false;
+
+    public void setBackgroundPlayActive(boolean active) {
+        this.isBackgroundPlayActive = active;
+    }
+
+    public void setPreviewingFromArchive(boolean previewing) {
+        this.isPreviewingFromArchive = previewing;
+    }
+
+    // Pas buka arsip baru, hapus cache lama kalau beda
+    public void prepareCacheForArchive(String archivePath) {
+        if (archivePath == null) return;
+        if (archivePath.equals(currentArchiveCache)) return;
+
+        // Hapus sinkron biar gak race
+        try {
+            File cache = getCacheDir();
+            File[] kids = cache.listFiles();
+            if (kids != null) {
+                for (File k : kids) {
+                    if ("root_staging".equals(k.getName())) continue;
+                    FileUtil.deleteDirectory(k);
+                }
+            }
+        } catch (Exception ignored) {}
+
+        currentArchiveCache = archivePath;
+    }
+
+    // Hapus cache pas keluar arsip
+    public void cleanupArchiveTemp() {
+        try {
+            File cache = getCacheDir();
+            File[] kids = cache.listFiles();
+            if (kids == null) return;
+            for (File k : kids) {
+                // Skip root_staging
+                if ("root_staging".equals(k.getName())) continue;
+                FileUtil.deleteDirectory(k);
+            }
+            currentArchiveCache = null;
+        } catch (Exception ignored) {}
+    }
+
+    // Startup: hapus cache lama kalau > 1 GB
+    private void startupCacheCleanup() {
+        try {
+            File cache = getCacheDir();
+            long total = 0;
+            File[] kids = cache.listFiles();
+            if (kids == null) return;
+            for (File k : kids) {
+                if (k.getName().equals("root_staging")) continue;
+                total += getDirSize(k);
+            }
+            // Kalau > 1 GB, hapus semua kecuali root_staging
+            if (total > 1024L * 1024 * 1024) {
+                for (File k : kids) {
+                    if (k.getName().equals("root_staging")) continue;
+                    FileUtil.deleteDirectory(k);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static long getDirSize(File dir) {
+        if (dir == null || !dir.exists()) return 0;
+        if (dir.isFile()) return dir.length();
+        long size = 0;
+        File[] kids = dir.listFiles();
+        if (kids != null) for (File f : kids) size += getDirSize(f);
+        return size;
+    }
+
+    // Hapus folder single_* pas keluar video
+    public void clearSingleCache() {
+        try {
+            File cache = getCacheDir();
+            File[] kids = cache.listFiles();
+            if (kids == null) return;
+            for (File k : kids) {
+                if (k.getName().startsWith("single_")) {
+                    FileUtil.deleteDirectory(k);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void cleanupNestedTemp() {
+        try {
+            File cache = getCacheDir();
+            File[] kids = cache.listFiles();
+            if (kids != null) {
+                for (File k : kids) {
+                    if (k.getName().startsWith("nested_") || k.getName().startsWith("view_") || k.getName().startsWith("view_p1_") || k.getName().startsWith("view_p2_")) {
+                        FileUtil.deleteDirectory(k);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -1852,6 +2275,7 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
             }
         } catch (Exception ignored) {
         }
+        cleanupNestedTemp();
         sidebar.unregister();
         if (isServiceBound) {
             getApplicationContext().unbindService(serviceConnection);
@@ -1871,20 +2295,6 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
     public void showSettingsDialog() {
         startActivity(new Intent(this, MainSettingsActivity.class));
     }
-
-    /** Re-applies the active-pane highlight style after it changes in Settings. */
-    public void reloadPaneHighlight() {
-        try {
-            paneHighlight.reload();
-        } catch (Exception ignored) {
-        }
-    }
-
-
-
-
-
-
 
     private boolean isNotHidden(File f) {
         return sortFilter.isNotHidden(f);
@@ -1932,4 +2342,3 @@ public class MainActivity extends BaseActivity implements PaneNavigationControll
         ftp.loadFtpFolderInPane(folder, pane1);
     }
 }
-

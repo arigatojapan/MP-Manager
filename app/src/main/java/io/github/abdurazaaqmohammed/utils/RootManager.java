@@ -3,7 +3,7 @@ package io.github.abdurazaaqmohammed.utils;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
-import androidx.preference.PreferenceManager;
+import android.preference.PreferenceManager;
 import android.text.TextUtils;
 
 import java.io.BufferedReader;
@@ -43,7 +43,7 @@ public class RootManager {
     private static final Pattern SAFE_ARG = Pattern.compile("^[a-zA-Z0-9_./\\-:]+$");
     private static final Pattern LS_LONG_LINE = Pattern.compile("^(\\S+)\\s+(?:\\d+\\s+)?\\S+\\s+\\S+\\s+(\\d+)\\s+((?:[A-Z][a-z]{2}\\s+\\d{1,2}|\\d{4}-\\d{2}-\\d{2})\\s+\\S+)\\s+(.*)$");
 
-    // Directories that should never be deleted (absolute block)
+    // Direktori yang tidak boleh dihapus
     private static final Set<String> BLOCKED_DELETE_PATHS = new HashSet<>(Arrays.asList(
             "/", "/system", "/system_ext", "/vendor", "/product", "/odm", "/oem",
             "/boot", "/recovery", "/sbin", "/proc", "/sys", "/dev",
@@ -53,14 +53,14 @@ public class RootManager {
             "/sdcard"
     ));
 
-    // Key directories: deletion is allowed but requires extra confirmation
+    // Folder penting boleh dihapus setelah konfirmasi tambahan
     private static final Set<String> KEY_DIRECTORIES = new HashSet<>(Arrays.asList(
             "/data/data", "/data/user", "/data/user_de",
             "/data/system", "/data/system/packages.xml",
             "/system/build.prop", "/system/etc/hosts"
     ));
 
-    // System-critical apps that must not be uninstalled
+    // Aplikasi sistem penting yang tidak boleh dihapus
     private static final Set<String> CRITICAL_PACKAGES = new HashSet<>(Arrays.asList(
             "com.android.systemui",
             "com.android.settings",
@@ -878,59 +878,30 @@ public class RootManager {
     }
 
     public String getAppApkPath(String packageName) throws IOException {
-        List<String> all = getAppApkPaths(packageName);
-        return all.isEmpty() ? null : all.get(0);
-    }
-
-    public List<String> getAppApkPaths(String packageName) {
-        List<String> out = new ArrayList<>();
-        if (!isPackageNameValid(packageName)) return out;
-        ShellResult result = executeFs("pm path " + escapeShellArg(packageName), 30);
-        if (result != null && result.isSuccess() && result.output != null) {
-            String output = result.output;
-            int start = 0;
-            while (start <= output.length()) {
-                int nl = output.indexOf((char) 10, start);
-                String line = nl < 0 ? output.substring(start) : output.substring(start, nl);
-                if (nl < 0) start = output.length() + 1;
-                else start = nl + 1;
-                String t = line.trim();
-                if (t.endsWith(String.valueOf((char) 13))) t = t.substring(0, t.length() - 1).trim();
-                if (t.startsWith("package:")) t = t.substring(8).trim();
-                if (!t.isEmpty()) out.add(t);
-            }
-        }
-        return out;
-    }
-
-    public String getAppUid(String packageName) {
         if (!isPackageNameValid(packageName)) return null;
-        ShellResult dump = executeFs("pm dump " + escapeShellArg(packageName), 30);
-        if (dump != null && dump.isSuccess() && dump.output != null) {
-            String uid = findUidInDump(dump.output);
-            if (uid != null) return uid;
-        }
-        ShellResult statResult = executeFs("stat -c %u " + escapeShellArg("/data/data/" + packageName), 30);
-        if (statResult != null && statResult.isSuccess() && statResult.output != null) {
-            String t = statResult.output.trim();
-            if (!t.isEmpty()) return t;
+        ShellResult result = execute("pm path " + escapeShellArg(packageName));
+        if (result.isSuccess() && result.output.contains("package:")) {
+            String path = result.output.replace("package:", "").trim();
+            if (path.contains("\n")) path = path.split("\n")[0].trim();
+            return path;
         }
         return null;
     }
 
-    private static String findUidInDump(String dump) {
-        // Avoid regex escapes: scan for userId=/appId= digit runs manually.
-        for (String key : new String[]{"userId=", "appId="}) {
-            int from = 0;
-            while (true) {
-                int idx = dump.indexOf(key, from);
-                if (idx < 0) break;
-                int s = idx + key.length();
-                int e = s;
-                while (e < dump.length() && Character.isDigit(dump.charAt(e))) e++;
-                if (e > s) return dump.substring(s, e);
-                from = s;
+    public String getAppUid(String packageName) {
+        if (!isPackageNameValid(packageName)) return null;
+        ShellResult result = execute("pm dump " + escapeShellArg(packageName) + " | grep 'userId='");
+        if (result.isSuccess() && result.output != null) {
+            for (String line : result.output.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("userId=")) {
+                    return trimmed.substring(8).trim();
+                }
             }
+        }
+        ShellResult statResult = execute("stat -c %u " + escapeShellArg("/data/data/" + packageName));
+        if (statResult.isSuccess() && statResult.output != null) {
+            return statResult.output.trim();
         }
         return null;
     }
@@ -938,29 +909,15 @@ public class RootManager {
     public List<String> getAppDataDirs(String packageName) {
         List<String> dirs = new ArrayList<>();
         if (!isPackageNameValid(packageName)) return dirs;
-        // /data/data, /data/user/0 and /data/user_de/0 are the same dir seen
-        // through different mount views (likewise /sdcard vs
-        // /storage/emulated/0), so return at most one per group to avoid
-        // showing duplicates. First candidate in each group wins.
-        String[][] groups = {
-                {
-                        "/data/data/" + packageName,
-                        "/data/user/0/" + packageName,
-                        "/data/user_de/0/" + packageName,
-                },
-                {
-                        "/sdcard/Android/data/" + packageName,
-                        "/storage/emulated/0/Android/data/" + packageName,
-                },
+        String[] candidates = {
+                "/data/data/" + packageName,
+                "/data/user/0/" + packageName,
+                "/sdcard/Android/data/" + packageName,
         };
-        for (String[] candidates : groups) {
-            for (String path : candidates) {
-                ShellResult result = executeFs("test -d " + escapeShellArg(path) + " && echo exists", 30);
-                if (result != null && result.isSuccess() && result.output != null
-                        && "exists".equals(result.output.trim())) {
-                    dirs.add(path);
-                    break;
-                }
+        for (String path : candidates) {
+            ShellResult result = execute("test -d " + escapeShellArg(path) + " && echo exists");
+            if (result.isSuccess() && "exists".equals(result.output.trim())) {
+                dirs.add(path);
             }
         }
         return dirs;
@@ -1129,7 +1086,7 @@ public class RootManager {
             }
         } catch (Exception ignored) {
         }
-        // Fallback: separate tests (slower but portable).
+        // Periksa satu per satu agar tetap kompatibel.
         try {
             boolean ex = exists(path);
             if (!ex) return new RootEntry(path, false, false, false, 0L, 0L, null);

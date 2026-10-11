@@ -70,7 +70,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.ActionBarDrawerToggle;
 import androidx.appcompat.app.AlertDialog;
-import io.github.abdurazaaqmohammed.core.ui.base.BaseActivity;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.PopupMenu;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.appcompat.widget.Toolbar;
@@ -143,9 +143,9 @@ import com.android.tools.smali.dexlib2.iface.ClassDef;
  * Re-sequenced and refactored for better clarity and utility.
  * Author: @developer-krushna
  */
-public class DexEditorActivity extends BaseActivity {
+public class DexEditorActivity extends AppCompatActivity {
 
-    // --- Constants and Static State ---
+    // Constants and Static State
     private static final long DOUBLE_PRESS_INTERVAL = 2000;
     public static ClassTree classTree;
     public static boolean isChanged;
@@ -164,7 +164,7 @@ public class DexEditorActivity extends BaseActivity {
     private final ClassTree.CompilationOptions sessionOptions = new ClassTree.CompilationOptions();
     private final List<TreeNode> treeRoots = new ArrayList<>();
     private final List<TreeNode> modifiedNodes = new ArrayList<>();
-    // --- Member Fields ---
+    // Member Fields
     public int dexVersion;
     public final List<TreeNode> searchNodes = new ArrayList<>();
     public String pendingSearchPath = null;
@@ -176,7 +176,7 @@ public class DexEditorActivity extends BaseActivity {
     private long lastBackPressTime = 0;
     private SharedPreferences dexPref;
     private Menu optionsMenu;
-    // --- UI Components ---
+    // UI Components
     private DrawerLayout drawerLayout;
     private Toolbar drawerToolbar;
     private ActionBarDrawerToggle drawerToggle;
@@ -316,7 +316,7 @@ public class DexEditorActivity extends BaseActivity {
         drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
             @Override
             public void onDrawerOpened(View drawerView) {
-                // Ensure the "Home" item highlight and menu states are up to date
+                // Perbarui pilihan Home dan status menu
                 if (tabsAdapter != null) {
                     tabsAdapter.notifyItemChanged(0);
                 }
@@ -386,7 +386,7 @@ public class DexEditorActivity extends BaseActivity {
         explorerTabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override
             public void onTabSelected(TabLayout.Tab tab) {
-                // Default behavior handled by ViewPager2
+                // Perilaku bawaan ditangani ViewPager2
             }
 
             @Override
@@ -424,7 +424,7 @@ public class DexEditorActivity extends BaseActivity {
     }
 
     private void initializeLogic() {
-        // Pre-initialize heavy components in background to avoid lag on first editor open
+        // Siapkan komponen berat di background sebelum editor dibuka
         new Thread(() -> {
             SmaliInstructionHelper.init(getApplicationContext());
             UnifiedEditorFragment.ensureLanguageInitialized(getApplicationContext());
@@ -957,7 +957,7 @@ public class DexEditorActivity extends BaseActivity {
         }
 
         if (position == 0 && !needsExplorerRefresh) {
-             // Avoid heavy refresh during swipe if not needed
+             // Jangan refresh berat saat swipe kalau tidak perlu
              return;
         }
 
@@ -2245,7 +2245,7 @@ public class DexEditorActivity extends BaseActivity {
     }
 
     private static class ExplorerTabAdapter extends FragmentStateAdapter {
-        public ExplorerTabAdapter(@NonNull BaseActivity activity) {
+        public ExplorerTabAdapter(@NonNull AppCompatActivity activity) {
             super(activity);
         }
 
@@ -2631,7 +2631,7 @@ public class DexEditorActivity extends BaseActivity {
     }
 
     private static class TabAdapter extends FragmentStateAdapter {
-        public TabAdapter(@NonNull BaseActivity activity) {
+        public TabAdapter(@NonNull AppCompatActivity activity) {
             super(activity);
         }
 

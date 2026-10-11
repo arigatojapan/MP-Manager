@@ -9,6 +9,8 @@ import android.os.Environment;
 import org.apache.commons.io.FilenameUtils;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -53,6 +55,7 @@ public class FileUtils {
         for (String ext : IMAGE_EXTS) if (lower.endsWith(ext)) return true;
         return false;
     }
+
     public static boolean doesNotHaveStoragePerm(Context context) {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ? !Environment.isExternalStorageManager() : Build.VERSION.SDK_INT > 22 && context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED;
     }
@@ -75,23 +78,23 @@ public class FileUtils {
             try { is.reset(); } catch (IOException ignored) { }
         }
         if (read < 2) return false;
-        // Binary Android XML magic: chunk type RES_XML_TYPE (0x0003) + header size 0x0008 (LE)
+        // Magic byte XML biner: RES_XML_TYPE (0x0003) + header size 0x0008 (LE)
         // bytes: 03 00 08 00
         if (read >= 4 && (magic[0] & 0xFF) == 0x03 && (magic[1] & 0xFF) == 0x00
                 && (magic[2] & 0xFF) == 0x08 && (magic[3] & 0xFF) == 0x00) {
             return true;
         }
-        // Plain-text XML (even without <?xml header) starts with optional BOM/whitespace then '<'.
-        // Binary garbage decoded as text could also contain '<', so magic check above is authoritative.
+        // XML teks bisa diawali BOM atau spasi sebelum tanda <.
+        // Data biner juga bisa berisi <, jadi tetap cek magic byte.
         int i = 0;
         // Skip UTF-8 BOM
         if (read >= 3 && (magic[0] & 0xFF) == 0xEF && (magic[1] & 0xFF) == 0xBB && (magic[2] & 0xFF) == 0xBF) i = 3;
-        // Skip UTF-16 BOMs
+        // Skip UTF-16 BOM
         else if (read >= 2 && (((magic[0] & 0xFF) == 0xFF && (magic[1] & 0xFF) == 0xFE)
                 || ((magic[0] & 0xFF) == 0xFE && (magic[1] & 0xFF) == 0xFF))) i = 2;
         while (i < read && (magic[i] == ' ' || magic[i] == '\t' || magic[i] == '\r' || magic[i] == '\n')) i++;
         if (i >= read) return false;
-        // NUL byte in the first bytes => binary, but not AXML magic => not AXML
+        // Ada byte NUL tanpa magic AXML berarti bukan AXML
         for (int k = 0; k < read; k++) if (magic[k] == 0) return false;
         return false;
     }
@@ -114,14 +117,15 @@ public class FileUtils {
                 || t.contains("<manifest")
                 || t.contains("<resources");
     }
-     public static File copyFileFromAssetsAndGetFile(String fileName, Context context) throws IOException {
+
+    public static File copyFileFromAssetsAndGetFile(String fileName, Context context) throws IOException {
         File destinationFile = new File(context.getFilesDir(), fileName);
         if(!destinationFile.exists()) try(InputStream is = context.getAssets().open(fileName)) {
             copyFile(is, destinationFile);
         }
         return destinationFile;
     }
-    
+
     public static File getDebugKeystore(Context context) throws IOException {
         File destinationFile = new File(context.getFilesDir(), "debug.keystore");
         if (!destinationFile.exists() || !isDebugKeystoreValid(destinationFile)) {
@@ -229,5 +233,101 @@ public class FileUtils {
 
     public static File getUnusedFile(File appFolder, String name) {
         return getUnusedFile(new File(appFolder, name));
+    }
+
+    // Safe zip ops biar APK gak korup
+
+    // Baca semua byte dari InputStream
+    public static byte[] readAllBytes(InputStream is) throws IOException {
+        if (is == null) return new byte[0];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+        return bos.toByteArray();
+    }
+
+    // Backup ke .bak kalau belum ada
+    public static boolean backupFile(File file) {
+        if (file == null || !file.exists()) return false;
+        File backup = new File(file.getPath() + ".bak");
+        if (backup.exists()) return true;
+        try {
+            copyFile(file, backup);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // Safe replace: backup, copy ke tmp, validate, baru rename
+    public static void safeReplaceZipEntry(File targetFile, String entryPath, byte[] newBytes)
+            throws IOException {
+        if (targetFile == null || !targetFile.exists()) {
+            throw new IOException("Target file does not exist");
+        }
+        if (newBytes == null || newBytes.length == 0) {
+            throw new IOException("New bytes is empty");
+        }
+
+        File backupFile = new File(targetFile.getPath() + ".bak");
+        File tempFile = new File(targetFile.getPath() + ".tmp");
+
+        // 1. Backup dulu
+        if (!backupFile.exists()) {
+            copyFile(targetFile, backupFile);
+        }
+
+        // 2. Copy file asli ke temporary
+        copyFile(targetFile, tempFile);
+
+        // 3. Modifikasi file temporary
+        try (net.lingala.zip4j.ZipFile tempZip = new net.lingala.zip4j.ZipFile(tempFile);
+             InputStream is = new ByteArrayInputStream(newBytes)) {
+            net.lingala.zip4j.model.ZipParameters zp = new net.lingala.zip4j.model.ZipParameters();
+            zp.setFileNameInZip(entryPath);
+            tempZip.addStream(is, zp);
+        } catch (Exception e) {
+            tempFile.delete();
+            throw new IOException("Failed to modify temp file: " + e.getMessage(), e);
+        }
+
+        // 4. Validasi file temporary
+        if (!tempFile.exists() || tempFile.length() == 0) {
+            tempFile.delete();
+            throw new IOException("Modified file is empty (0 KB) — aborting");
+        }
+        try (net.lingala.zip4j.ZipFile validate = new net.lingala.zip4j.ZipFile(tempFile)) {
+            if (validate.getFileHeaders() == null || validate.getFileHeaders().isEmpty()) {
+                tempFile.delete();
+                throw new IOException("Modified file is not a valid zip — aborting");
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            tempFile.delete();
+            throw new IOException("Modified file validation failed: " + e.getMessage(), e);
+        }
+
+        // 5. Ganti file asli dengan file temporary
+        if (!targetFile.delete()) {
+            tempFile.delete();
+            throw new IOException("Cannot delete original file");
+        }
+        if (!tempFile.renameTo(targetFile)) {
+            // Copy manual kalau rename gagal beda filesystem
+            try {
+                copyFile(tempFile, targetFile);
+            } finally {
+                tempFile.delete();
+            }
+        }
+    }
+
+    // Sama kayak di atas, tapi InputStream
+    public static void safeReplaceZipEntry(File targetFile, String entryPath, InputStream is)
+            throws IOException {
+        byte[] bytes = readAllBytes(is);
+        safeReplaceZipEntry(targetFile, entryPath, bytes);
     }
 }
