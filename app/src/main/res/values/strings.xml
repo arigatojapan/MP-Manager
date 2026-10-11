@@ -1505,4 +1505,30 @@ Layout Inspector
         <item>CSS</item>
         <item>Markdown</item>
     </string-array>
+
+    <string name="compare_dex">Compare DEX</string>
+    <string name="old_file_left">Old file (left)</string>
+    <string name="exchange_files">Exchange files</string>
+    <string name="ignore_whitespace">Ignore whitespace</string>
+    <string name="ignore_whitespace_and_empty_lines">Ignore whitespace and empty lines</string>
+    <string name="previous_difference">Previous difference</string>
+    <string name="next_difference">Next difference</string>
+    <string name="hide_added_classes">Hide added classes</string>
+
+    <string name="hide_changed_classes">Hide changed classes</string>
+    <string name="hide_removed_classes">Hide removed classes</string>
+    <string name="ignore">Ignore</string>
+    <string name="ignore_compilation_optimizations">Ignore compilation optimizations</string>
+    <string name="ignore_debug_information">Ignore debug information</string>
+    <string name="ignore_none">Ignore none</string>
+    <string name="ignore_nop_instruction">Ignore NOP instructions</string>
+    <string name="ignore_register_count">Ignore register count</string>
+    <string name="ignore_trim_whitespace">Ignore trim whitespace</string>
+    <string name="new_file_right">New file (right)</string>
+    <string name="save_password">Save password</string>
+    <string name="sora_editor_replace">Replace</string>
+    <string name="view_mode">View mode</string>
+    <string name="view_mode_auto">Auto</string>
+    <string name="view_mode_side_by_side">Side by side</string>
+    <string name="view_mode_unified">Unified</string>
 </resources>
